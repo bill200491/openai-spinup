@@ -2,7 +2,7 @@ import numpy as np
 import tensorflow as tf
 import gym
 import time
-import core as core
+import spinup.algos.ppo.core as core
 from spinup.utils.logx import EpochLogger
 from spinup.utils.mpi_tf import MpiAdamOptimizer, sync_all_params
 from spinup.utils.mpi_tools import mpi_fork, mpi_avg, proc_id, mpi_statistics_scalar, num_procs
@@ -256,48 +256,30 @@ def ppo(env_fn, actor_critic=core.mlp_actor_critic, ac_kwargs=dict(), seed=0,
             a, v_t, logp_t = sess.run(get_action_ops, feed_dict={x_ph: o.reshape(1,-1)})
 
             # save and log
-            s=o
             buf.store(o, a, r, v_t, logp_t)
             logger.store(VVals=v_t)
 
             o, r, d, _ = env.step(a[0])
-            s_=o
-            
-            if d==True and rsd<0.1 and o[6]==1 and o[7]==1:
-                print("Done and Landed...",r)
-                if r<20:
-                    r= 20
-            if r==-100:
-                r = -10
-            if local_steps_per_epoch-1 < ep_len:
-                r = -20
-            rsd= np.sqrt(s_[0]**2+s_[1]**2)
-            
-                
-            d1= s[0] - s_[0]
-            d2= s[1] - s_[1]
-            dst= np.sqrt(d1**2+d2**2)
-            r+= 10.*dst
-            
-            
-            #if  o[6]==1 and o[7]==1:
-                #r += 20
+            pos=env.unwrapped.hull.position
+            rsd= np.sqrt(pos[0]**2+pos[1]**2)/10
+            if (max_ep_len-1)<ep_len:
+                r= -100
             ep_ret += r
             ep_len += 1
-            
-            
-            
+
             terminal = d or (ep_len == max_ep_len)
-            if terminal or (t==local_steps_per_epoch-1):
+            if terminal or (ep_ret < 5 and ep_len==300 ) or (t==local_steps_per_epoch-1):
+                r += rsd
+                ep_ret += rsd
                 if not(terminal):
-                    print('Warning: trajectory cut off by epoch at %d steps.'%ep_len, t, d,r)
+                    print('Warning: trajectory cut off by epoch at %d steps.'%ep_len, t, d, r, rsd)
                 # if trajectory didn't reach terminal state, bootstrap value target
                 last_val = r if d else sess.run(v, feed_dict={x_ph: o.reshape(1,-1)})
                 buf.finish_path(last_val)
                 if terminal:
                     # only save EpRet / EpLen if trajectory finished
                     logger.store(EpRet=ep_ret, EpLen=ep_len)
-                bk_ret = ep_ret
+                bk_ret= ep_ret
                 o, r, d, ep_ret, ep_len = env.reset(), 0, False, 0, 0
 
         # Save model
@@ -328,13 +310,9 @@ def ppo(env_fn, actor_critic=core.mlp_actor_critic, ac_kwargs=dict(), seed=0,
         logger.store(VVals=v_t)
         logger.store(EpRet=bk_ret, EpLen=ep_len)
 
+# pkill -9 ^python3 ; python3 ppo.py --env BipedalWalker-v2 --hid=500 --l 3 --gamma 0.99 --steps 4000 --epochs 30000 --exp_name BipedalWalker
 
-# pkill -9 ^python3 ; python3 ppo.py --env LunarLanderContinuous-v2 --hid=300 --l 2 --gamma 0.99 --steps 1200 --epochs 500 --exp_name LunarLanderContinuous
-
-# pkill -9 ^python3 ; python3 test_policy.py  ../../data/LunarLanderContinuous/LunarLanderContinuous_s0/ -d
-
-
-# python3 test_policy.py  ../../data/LunarLanderContinuous/LunarLanderContinuous_s0/
+#  pkill -9 ^python3 ; python3 test_policy.py  ../../data/BipedalWalker/BipedalWalker_ppo03/ -d
 
 
 if __name__ == '__main__':
