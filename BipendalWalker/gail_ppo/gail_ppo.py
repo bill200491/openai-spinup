@@ -1,11 +1,14 @@
 import numpy as np
 import tensorflow as tf
 import gym
+import pickle
 import time
-import core as core
+import spinup.algos.ppo.core as core
 from spinup.utils.logx import EpochLogger
 from spinup.utils.mpi_tf import MpiAdamOptimizer, sync_all_params
 from spinup.utils.mpi_tools import mpi_fork, mpi_avg, proc_id, mpi_statistics_scalar, num_procs
+from spinup.utils.adversary import TransitionClassifier
+from spinup.utils.gail_dataset import Dataset, iterbatches, continue_Dset, traj_segment_generator
 
 
 class PPOBuffer:
@@ -89,10 +92,10 @@ Proximal Policy Optimization (by clipping),
 with early stopping based on approximate KL
 
 """
-def ppo(env_fn, actor_critic=core.mlp_actor_critic, ac_kwargs=dict(), seed=0, 
+def ppo(env_fn, traj_fn, actor_critic=core.mlp_actor_critic, ac_kwargs=dict(), seed=0, 
         steps_per_epoch=4000, epochs=50, gamma=0.99, clip_ratio=0.2, pi_lr=3e-4,
-        vf_lr=1e-3, train_pi_iters=80, train_v_iters=80, lam=0.97, max_ep_len=1000,
-        target_kl=0.01, logger_kwargs=dict(), save_freq=10):
+        vf_lr=1e-3, train_pi_iters=80, train_v_iters=80, train_d_iters=1, lam=0.97, 
+        max_ep_len=1000, target_kl=0.01, logger_kwargs=dict(), save_freq=10):
     """
 
     Args:
@@ -211,10 +214,16 @@ def ppo(env_fn, actor_critic=core.mlp_actor_critic, ac_kwargs=dict(), seed=0,
     approx_ent = tf.reduce_mean(-logp)                  # a sample estimate for entropy, also easy to compute
     clipped = tf.logical_or(ratio > (1+clip_ratio), ratio < (1-clip_ratio))
     clipfrac = tf.reduce_mean(tf.cast(clipped, tf.float32))
+    
+    # adversary
+    reward_giver = TransitionClassifier(env, 100, entcoeff=1e-3)
+    dataset = continue_Dset(expert_path= traj_fn, traj_limitation=-1)
 
     # Optimizers
     train_pi = MpiAdamOptimizer(learning_rate=pi_lr).minimize(pi_loss)
     train_v = MpiAdamOptimizer(learning_rate=vf_lr).minimize(v_loss)
+    train_d = MpiAdamOptimizer(learning_rate=vf_lr).minimize(reward_giver.total_loss)
+
 
     sess = tf.Session()
     sess.run(tf.global_variables_initializer())
@@ -239,6 +248,24 @@ def ppo(env_fn, actor_critic=core.mlp_actor_critic, ac_kwargs=dict(), seed=0,
         logger.store(StopIter=i)
         for _ in range(train_v_iters):
             sess.run(train_v, feed_dict=inputs)
+            
+        # ------------------ Update D ------------------
+        batch_size = len(obs) // 4
+        for _ in range(train_d_iters):
+            d_losses = 0
+            ob_expert, ac_expert = dataset.get_next_batch(len(obs))
+            for ob_batch, ac_batch in iterbatches(( obs, acs),
+                                                    include_final_partial_batch=False,
+                                                    batch_size=batch_size):
+                ob_expert, ac_expert = dataset.get_next_batch(len(ob_batch))
+                feed_dict={
+                        reward_giver.generator_obs_ph:ob_batch,
+                        reward_giver.generator_acs_ph:ac_batch,
+                        reward_giver.expert_obs_ph:ob_expert,
+                        reward_giver.expert_acs_ph:ac_expert
+                    }
+                loss = sess.run( [train_d, reward_giver.total_loss], feed_dict)[-1:]
+                
 
         # Log changes from update
         pi_l_new, v_l_new, kl, cf = sess.run([pi_loss, v_loss, approx_kl, clipfrac], feed_dict=inputs)
@@ -252,53 +279,45 @@ def ppo(env_fn, actor_critic=core.mlp_actor_critic, ac_kwargs=dict(), seed=0,
 
     # Main loop: collect experience in env and update/log each epoch
     for epoch in range(epochs):
+        obs=[]
+        acs=[]
+        
         for t in range(local_steps_per_epoch):
             a, v_t, logp_t = sess.run(get_action_ops, feed_dict={x_ph: o.reshape(1,-1)})
-
+            
+            rew = sess.run(reward_giver.reward_op, {reward_giver.generator_obs_ph: [o], reward_giver.generator_acs_ph: a} )[0][0]
             # save and log
-            s=o
-            buf.store(o, a, r, v_t, logp_t)
+            buf.store(o, a, rew, v_t, logp_t)
             logger.store(VVals=v_t)
-
+            
+            obs.append( o)
+            acs.append( a[0])
+            
+            #print(r, rew)
+            #rew = reward_giver.get_reward( o, a)
+            
             o, r, d, _ = env.step(a[0])
-            s_=o
+            pos=env.unwrapped.hull.position
+            rsd= np.sqrt(pos[0]**2+pos[1]**2)/10
             
-            if d==True and rsd<0.1 and o[6]==1 and o[7]==1:
-                print("Done and Landed...",r)
-                if r<20:
-                    r= 20
-            if r==-100:
-                r = -10
-            if (local_steps_per_epoch-1) == ep_len:
-                #print('Warning: ran out')
-                r = -20
-            rsd= np.sqrt(s_[0]**2+s_[1]**2)
-            
-                
-            d1= s[0] - s_[0]
-            d2= s[1] - s_[1]
-            dst= np.sqrt(d1**2+d2**2)
-            r+= 10.*dst
-            
-            
-            #if  o[6]==1 and o[7]==1:
-                #r += 20
+            if (max_ep_len-1)<ep_len:
+                r= -100
             ep_ret += r
             ep_len += 1
-            
-            
-            
+
             terminal = d or (ep_len == max_ep_len)
-            if terminal or (t==local_steps_per_epoch-1):
+            if terminal or (ep_ret < 5 and ep_len==300 ) or (t==local_steps_per_epoch-1):
+                r += rsd
+                ep_ret += rsd
                 if not(terminal):
-                    print('Warning: trajectory cut off by epoch at %d steps.'%ep_len,  d,r)
+                    print('Warning: trajectory cut off by epoch at %d steps.'%ep_len, d, r, rsd)
                 # if trajectory didn't reach terminal state, bootstrap value target
                 last_val = r if d else sess.run(v, feed_dict={x_ph: o.reshape(1,-1)})
                 buf.finish_path(last_val)
                 if terminal:
                     # only save EpRet / EpLen if trajectory finished
                     logger.store(EpRet=ep_ret, EpLen=ep_len)
-                bk_ret = ep_ret
+                bk_ret= ep_ret
                 o, r, d, ep_ret, ep_len = env.reset(), 0, False, 0, 0
 
         # Save model
@@ -307,6 +326,8 @@ def ppo(env_fn, actor_critic=core.mlp_actor_critic, ac_kwargs=dict(), seed=0,
 
         # Perform PPO update!
         update()
+            
+           
 
         # Log info about epoch
         logger.log_tabular('Epoch', epoch)
@@ -329,18 +350,15 @@ def ppo(env_fn, actor_critic=core.mlp_actor_critic, ac_kwargs=dict(), seed=0,
         logger.store(VVals=v_t)
         logger.store(EpRet=bk_ret, EpLen=ep_len)
 
+# pkill -9 ^python3 ; python3 gail_ppo.py traj-10.pkl --env BipedalWalker-v2 --hid=500 --l 3 --gamma 0.99 --steps 4000 --epochs 30000 --exp_name BipedalWalker
 
-# pkill -9 ^python3 ; python3 ppo.py --env LunarLanderContinuous-v2 --hid=300 --l 2 --gamma 0.99 --steps 1200 --epochs 500 --exp_name LunarLanderContinuous
-
-# pkill -9 ^python3 ; python3 test_policy.py  ../../data/LunarLanderContinuous/LunarLanderContinuous_s0/ -d
-
-
-# python3 test_policy.py  ../../data/LunarLanderContinuous/LunarLanderContinuous_s0/
+#  pkill -9 ^python3 ; python3 test_policy.py  ../../data/BipedalWalker/BipedalWalker_ppo03/ -d
 
 
 if __name__ == '__main__':
     import argparse
     parser = argparse.ArgumentParser()
+    parser.add_argument('traj', type=str)
     parser.add_argument('--env', type=str, default='HalfCheetah-v2')
     parser.add_argument('--hid', type=int, default=64)
     parser.add_argument('--l', type=int, default=2)
@@ -357,7 +375,7 @@ if __name__ == '__main__':
     from spinup.utils.run_utils import setup_logger_kwargs
     logger_kwargs = setup_logger_kwargs(args.exp_name, args.seed)
 
-    ppo(lambda : gym.make(args.env), actor_critic=core.mlp_actor_critic,
+    ppo(lambda : gym.make(args.env), args.traj, actor_critic=core.mlp_actor_critic,
         ac_kwargs=dict(hidden_sizes=[args.hid]*args.l), gamma=args.gamma, 
         seed=args.seed, steps_per_epoch=args.steps, epochs=args.epochs,
         logger_kwargs=logger_kwargs)
