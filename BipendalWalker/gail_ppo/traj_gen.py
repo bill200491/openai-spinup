@@ -124,7 +124,7 @@ def run_policy(env, traj_fn, get_action, max_ep_len=None, num_episodes=100, rend
     
     
 
-# pkill -9 ^python3 ; rm -rf  traj-10.* ; python3 traj_gen.py ../../../data/BipedalWalker/BipedalWalker_ppo03/ traj-10 -d -n 10 
+# pkill -9 ^python3 ;  python3 traj_gen.py ../../../data/BipedalWalker/BipedalWalker_ppo03/ traj-10 -d -n 10 
 
 
 if __name__ == '__main__':

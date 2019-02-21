@@ -94,8 +94,8 @@ with early stopping based on approximate KL
 """
 def ppo(env_fn, traj_fn, actor_critic=core.mlp_actor_critic, ac_kwargs=dict(), seed=0, 
         steps_per_epoch=4000, epochs=50, gamma=0.99, clip_ratio=0.2, pi_lr=3e-4,
-        vf_lr=1e-3, train_pi_iters=80, train_v_iters=80, train_d_iters=1, lam=0.97, 
-        max_ep_len=1000, target_kl=0.01, logger_kwargs=dict(), save_freq=10):
+        vf_lr=1e-3, ds_lr=1e-3, train_pi_iters=80, train_v_iters=80, train_d_iters=1, 
+        lam=0.97, max_ep_len=1000, target_kl=0.01, logger_kwargs=dict(), save_freq=10):
     """
 
     Args:
@@ -222,7 +222,7 @@ def ppo(env_fn, traj_fn, actor_critic=core.mlp_actor_critic, ac_kwargs=dict(), s
     # Optimizers
     train_pi = MpiAdamOptimizer(learning_rate=pi_lr).minimize(pi_loss)
     train_v = MpiAdamOptimizer(learning_rate=vf_lr).minimize(v_loss)
-    train_d = MpiAdamOptimizer(learning_rate=vf_lr).minimize(reward_giver.total_loss)
+    train_d = MpiAdamOptimizer(learning_rate=ds_lr).minimize(reward_giver.total_loss)
 
 
     sess = tf.Session()

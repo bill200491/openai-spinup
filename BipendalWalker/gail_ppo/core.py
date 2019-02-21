@@ -82,7 +82,7 @@ def mlp_gaussian_policy(x, a, hidden_sizes, activation, output_activation, actio
     pi = mu + tf.random_normal(tf.shape(mu)) * std
     logp = gaussian_likelihood(a, mu, log_std)
     logp_pi = gaussian_likelihood(pi, mu, log_std)
-    return pi, logp, logp_pi
+    return pi, mu, logp, logp_pi
 
 
 """
@@ -98,10 +98,10 @@ def mlp_actor_critic(x, a, hidden_sizes=(64,64), activation=tf.tanh,
         policy = mlp_categorical_policy
 
     with tf.variable_scope('pi'):
-        pi, logp, logp_pi = policy(x, a, hidden_sizes, activation, output_activation, action_space)
+        pi, mu, logp, logp_pi = policy(x, a, hidden_sizes, activation, output_activation, action_space)
     with tf.variable_scope('v'):
         v = tf.squeeze(mlp(x, list(hidden_sizes)+[1], activation, None), axis=1)
-    return pi, logp, logp_pi, v
+    return pi, mu, logp, logp_pi, v
 
 """
 Discriminator
