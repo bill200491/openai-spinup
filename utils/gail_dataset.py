@@ -105,6 +105,8 @@ class continue_Dset(object):
         traj_data = np.load(expert_path)
         if traj_limitation < 0:
             traj_limitation = len(traj_data['obs'])
+            
+        self.lens= traj_data['ep_lens'][:traj_limitation]
         obs = traj_data['obs'][:traj_limitation]
         acs = traj_data['acs'][:traj_limitation]
         print(np.prod(obs.shape[:][0]), '---------->', obs.shape, acs.shape, obs[0].shape, acs[0].shape)
